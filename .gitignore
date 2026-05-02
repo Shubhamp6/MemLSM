@@ -1,0 +1,16 @@
+bin/
+*.exe
+*.test
+.vscode/
+.idea/
+
+vendor/
+
+.env
+
+*.log
+internals/wal/*.log
+cmd/../internals/wal/*.log
+
+.DS_Store
+thumbs.db

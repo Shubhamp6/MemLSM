@@ -40,7 +40,7 @@ func (e *Engine) Put(key string, value []byte) error {
 		e.immutableMemtable = e.activeMemtable
 		e.activeMemtable = memtable.NewMemTable(e.cfg)
 
-		archivedWalFilePath := e.cfg.WALRemoveFilePath + "-" + strconv.Itoa(e.fileCount)
+		archivedWalFilePath := e.cfg.WALRemoveFilePath + "-" + strconv.Itoa(e.fileCount) + ".log"
 		newWal, err := e.wal.Rotate(e.cfg.WALFilePath, archivedWalFilePath)
 
 		if err != nil {
@@ -51,11 +51,11 @@ func (e *Engine) Put(key string, value []byte) error {
 		e.wal = newWal
 		e.mu.Unlock()
 
-		go func() {
-			if err := e.flushToSSTable(); err == nil {
-				wal.Delete(archivedWalFilePath)
-			}
-		}()
+		// go func() {
+		if err := e.flushToSSTable(); err == nil {
+			wal.Delete(archivedWalFilePath)
+		}
+		// }()
 	}
 
 	err := e.wal.Write(key, value)
@@ -93,7 +93,7 @@ func (e *Engine) flushToSSTable() error {
 
 	defer ssTable.Close()
 
-	index := []int{}
+	index := []sstable.IndexEntry{}
 	i := 1
 	binaryOffset := 0
 
@@ -107,7 +107,7 @@ func (e *Engine) flushToSSTable() error {
 		binaryOffset += curItemBinaryOffset
 
 		if i%10 == 0 {
-			index = append(index, binaryOffset)
+			index = append(index, sstable.IndexEntry{Key: flushItem.Key, Offset: binaryOffset})
 		}
 		i++
 	}

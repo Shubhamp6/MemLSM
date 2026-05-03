@@ -19,6 +19,8 @@ func main() {
 	if err != nil {
 		log.Printf("Error initializing Engine: %v", err)
 	}
+
+	//test flushing
 	e.Put("userid", []byte("name"))
 	e.Put("userid", []byte("name"))
 }

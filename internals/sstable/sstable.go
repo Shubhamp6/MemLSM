@@ -2,15 +2,20 @@ package sstable
 
 import (
 	"encoding/binary"
+	"io"
 	"log"
 	"os"
-	"strconv"
 	"sync"
 )
 
 type SSTable struct {
 	file *os.File
 	mu   sync.RWMutex
+}
+
+type IndexEntry struct {
+	Key    string
+	Offset int
 }
 
 func Open(path string) (*SSTable, error) {
@@ -50,17 +55,19 @@ func (sstable *SSTable) FlushWriteItems(key string, value []byte) (int, error) {
 	return binaryOffset, sstable.file.Sync()
 }
 
-func (sstable *SSTable) FlushWriteIndex(index []int) error {
+func (sstable *SSTable) FlushWriteIndex(indexEntries []IndexEntry) error {
 	sstable.mu.Lock()
 	defer sstable.mu.Unlock()
 
-	for _, offset := range index {
-		keyBuf := []byte(strconv.Itoa(offset))
+	indexStartOffset, _ := sstable.file.Seek(0, io.SeekCurrent)
+	for _, indexEntry := range indexEntries {
+		keyBuf := []byte(indexEntry.Key)
+		buf := make([]byte, 4+len(keyBuf)+8)
 
-		buf := make([]byte, 4+len(keyBuf))
+		binary.BigEndian.PutUint32(buf[0:4], uint32(len(keyBuf)))
+		copy(buf[4:4+len(keyBuf)], keyBuf)
 
-		binary.BigEndian.PutUint32(buf, uint32(len(keyBuf)))
-		copy(buf[4:], keyBuf)
+		binary.BigEndian.PutUint64(buf[4+len(keyBuf):], uint64(indexEntry.Offset))
 
 		_, err := sstable.file.Write(buf)
 
@@ -70,6 +77,16 @@ func (sstable *SSTable) FlushWriteIndex(index []int) error {
 		}
 
 	}
+
+	footerBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(footerBuf, uint64(indexStartOffset))
+	_, err := sstable.file.Write(footerBuf)
+
+	if err != nil {
+		log.Printf("Error writing index start offset to ss table file: %v", err)
+		return err
+	}
+
 	return sstable.file.Sync()
 }
 

@@ -19,5 +19,6 @@ func main() {
 	if err != nil {
 		log.Printf("Error initializing Engine: %v", err)
 	}
-	e.Put("key1", []byte("value1"))
+	e.Put("userid", []byte("name"))
+	e.Put("userid", []byte("name"))
 }

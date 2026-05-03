@@ -25,6 +25,10 @@ func Open(path string) (*WAL, error) {
 	return &WAL{file: f}, nil
 }
 
+func Delete(path string) error {
+	return os.Remove(path)
+}
+
 func (w *WAL) Write(key string, value []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -96,6 +100,32 @@ func (w *WAL) Recover(sl *memtable.SkipList) error {
 
 		sl.Put(string(keyBuf), valueBuf)
 	}
+}
+
+func (w *WAL) Rotate(path string, deleteWALFilePath string) (*WAL, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	err := w.Close()
+
+	if err != nil {
+		log.Printf("Error closing WAL file: %v", err)
+		return nil, err
+	}
+
+	err = os.Rename(path, deleteWALFilePath)
+
+	if err != nil {
+		log.Printf("Error renaming WAL file: %v", err)
+		return nil, err
+	}
+
+	wal, err := Open(path)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return wal, err
 }
 
 func (w *WAL) Close() error {

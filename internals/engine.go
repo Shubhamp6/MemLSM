@@ -2,13 +2,20 @@ package engine
 
 import (
 	"mem-lsm/config"
+	sstable "mem-lsm/internals/SSTable"
 	memtable "mem-lsm/internals/memtable"
 	"mem-lsm/internals/wal"
+	"strconv"
+	"sync"
 )
 
 type Engine struct {
-	wal      *wal.WAL
-	memtable *memtable.SkipList
+	cfg               *config.Config
+	wal               *wal.WAL
+	activeMemtable    *memtable.MemTable
+	immutableMemtable *memtable.MemTable
+	fileCount         int
+	mu                sync.Mutex
 }
 
 func NewEngine(cfg *config.Config) (*Engine, error) {
@@ -19,26 +26,99 @@ func NewEngine(cfg *config.Config) (*Engine, error) {
 	}
 
 	return &Engine{
-		wal:      wal,
-		memtable: memtable.NewSkipList(cfg),
+		cfg:            cfg,
+		wal:            wal,
+		activeMemtable: memtable.NewMemTable(cfg),
+		fileCount:      0,
 	}, nil
 }
 
 func (e *Engine) Put(key string, value []byte) error {
+
+	if e.activeMemtable.IsFull(key, value) == true {
+		e.mu.Lock()
+		e.immutableMemtable = e.activeMemtable
+		e.activeMemtable = memtable.NewMemTable(e.cfg)
+
+		archivedWalFilePath := e.cfg.WALRemoveFilePath + "-" + strconv.Itoa(e.fileCount)
+		newWal, err := e.wal.Rotate(e.cfg.WALFilePath, archivedWalFilePath)
+
+		if err != nil {
+			e.mu.Unlock()
+			return err
+		}
+
+		e.wal = newWal
+		e.mu.Unlock()
+
+		go func() {
+			if err := e.flushToSSTable(); err == nil {
+				wal.Delete(archivedWalFilePath)
+			}
+		}()
+	}
+
 	err := e.wal.Write(key, value)
 
 	if err != nil {
 		return err
 	}
 
-	e.memtable.Put(key, value)
+	e.activeMemtable.SkipList.Put(key, value)
 	return nil
 }
 
 func (e *Engine) Get(key string) (bool, []byte) {
-	return e.memtable.Get(key)
+	found, value := e.activeMemtable.SkipList.Get(key)
+
+	if found == false {
+		found, value = e.immutableMemtable.SkipList.Get(key)
+	}
+
+	return found, value
 }
 
 func (e *Engine) Recover() error {
-	return e.wal.Recover(e.memtable)
+	return e.wal.Recover(e.activeMemtable.SkipList)
+}
+
+func (e *Engine) flushToSSTable() error {
+	flushItems := e.immutableMemtable.FlushIterator()
+
+	ssTable, err := sstable.Open(e.cfg.SSTableFilePath + "-" + strconv.Itoa(e.fileCount) + ".sst")
+
+	if err != nil {
+		return err
+	}
+
+	defer ssTable.Close()
+
+	index := []int{}
+	i := 1
+	binaryOffset := 0
+
+	for flushItem := range flushItems {
+		curItemBinaryOffset, err := ssTable.FlushWriteItems(flushItem.Key, flushItem.Value)
+
+		if err != nil {
+			return err
+		}
+
+		binaryOffset += curItemBinaryOffset
+
+		if i%10 == 0 {
+			index = append(index, binaryOffset)
+		}
+		i++
+	}
+
+	err = ssTable.FlushWriteIndex(index)
+
+	if err != nil {
+		return err
+	}
+
+	e.fileCount++
+
+	return nil
 }

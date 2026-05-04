@@ -2,6 +2,7 @@ package sstable
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -17,6 +18,8 @@ type IndexEntry struct {
 	Key    string
 	Offset int
 }
+
+type SSTableRegistry []string
 
 func Open(path string) (*SSTable, error) {
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -92,4 +95,10 @@ func (sstable *SSTable) FlushWriteIndex(indexEntries []IndexEntry) error {
 
 func (sstable *SSTable) Close() error {
 	return sstable.file.Close()
+}
+
+func GetSSTableFileNameSuffix(sequenceNumber int, sequenceLen int) string {
+	sequenceNumberString := fmt.Sprintf("%0*d", sequenceLen, sequenceNumber)
+
+	return "-" + sequenceNumberString + ".sst"
 }

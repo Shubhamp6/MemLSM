@@ -51,11 +51,12 @@ func (e *Engine) Put(key string, value []byte) error {
 		e.wal = newWal
 		e.mu.Unlock()
 
-		// go func() {
-		if err := e.flushToSSTable(); err == nil {
-			wal.Delete(archivedWalFilePath)
-		}
-		// }()
+		go func() {
+			if err := e.flushToSSTable(); err == nil {
+				wal.Delete(archivedWalFilePath)
+				e.immutableMemtable = nil
+			}
+		}()
 	}
 
 	err := e.wal.Write(key, value)
@@ -71,8 +72,12 @@ func (e *Engine) Put(key string, value []byte) error {
 func (e *Engine) Get(key string) (bool, []byte) {
 	found, value := e.activeMemtable.SkipList.Get(key)
 
-	if found == false {
+	if found == false && e.immutableMemtable != nil {
 		found, value = e.immutableMemtable.SkipList.Get(key)
+	}
+
+	if found == false {
+
 	}
 
 	return found, value
@@ -85,7 +90,7 @@ func (e *Engine) Recover() error {
 func (e *Engine) flushToSSTable() error {
 	flushItems := e.immutableMemtable.FlushIterator()
 
-	ssTable, err := sstable.Open(e.cfg.SSTableFilePath + "-" + strconv.Itoa(e.fileCount) + ".sst")
+	ssTable, err := sstable.Open(e.cfg.SSTableFilePath + sstable.GetSSTableFileNameSuffix(e.fileCount, e.cfg.SSTableFileSeqeunceLen))
 
 	if err != nil {
 		return err
@@ -98,13 +103,13 @@ func (e *Engine) flushToSSTable() error {
 	binaryOffset := 0
 
 	for flushItem := range flushItems {
-		curItemBinaryOffset, err := ssTable.FlushWriteItems(flushItem.Key, flushItem.Value)
+		curItemSize, err := ssTable.FlushWriteItems(flushItem.Key, flushItem.Value)
 
 		if err != nil {
 			return err
 		}
 
-		binaryOffset += curItemBinaryOffset
+		binaryOffset += curItemSize
 
 		if i%10 == 0 {
 			index = append(index, sstable.IndexEntry{Key: flushItem.Key, Offset: binaryOffset})

@@ -1,9 +1,10 @@
 package engine
 
 import (
+	"log"
 	"mem-lsm/config"
-	sstable "mem-lsm/internals/SSTable"
 	memtable "mem-lsm/internals/memtable"
+	sstable "mem-lsm/internals/sstable"
 	"mem-lsm/internals/wal"
 	"strconv"
 	"sync"
@@ -14,6 +15,7 @@ type Engine struct {
 	wal               *wal.WAL
 	activeMemtable    *memtable.MemTable
 	immutableMemtable *memtable.MemTable
+	ssTableRegistry   *sstable.SSTableRegistry
 	fileCount         int
 	mu                sync.Mutex
 }
@@ -26,10 +28,11 @@ func NewEngine(cfg *config.Config) (*Engine, error) {
 	}
 
 	return &Engine{
-		cfg:            cfg,
-		wal:            wal,
-		activeMemtable: memtable.NewMemTable(cfg),
-		fileCount:      0,
+		cfg:             cfg,
+		wal:             wal,
+		activeMemtable:  memtable.NewMemTable(cfg),
+		ssTableRegistry: sstable.NewSSTableRegistry(cfg),
+		fileCount:       0,
 	}, nil
 }
 
@@ -51,12 +54,12 @@ func (e *Engine) Put(key string, value []byte) error {
 		e.wal = newWal
 		e.mu.Unlock()
 
-		go func() {
-			if err := e.flushToSSTable(); err == nil {
-				wal.Delete(archivedWalFilePath)
-				e.immutableMemtable = nil
-			}
-		}()
+		// go func() {
+		if err := e.flushToSSTable(); err == nil {
+			wal.Delete(archivedWalFilePath)
+			e.immutableMemtable = nil
+		}
+		// }()
 	}
 
 	err := e.wal.Write(key, value)
@@ -84,7 +87,27 @@ func (e *Engine) Get(key string) (bool, []byte) {
 }
 
 func (e *Engine) Recover() error {
-	return e.wal.Recover(e.activeMemtable.SkipList)
+	err := e.wal.RecoverMemoryStore(e.activeMemtable.SkipList)
+
+	if err != nil {
+		log.Printf("Error recovering memory store data from WAL file: %v", err)
+		return err
+	}
+
+	err = e.ssTableRegistry.RecovertSSTableRegistry()
+
+	if err != nil {
+		log.Printf("Error recovering ss table registry from manifest file: %v", err)
+		return err
+	}
+
+	metadataLen := len(e.ssTableRegistry.Metadata)
+
+	if metadataLen > 0 {
+		e.fileCount = e.ssTableRegistry.Metadata[metadataLen-1].FileNumber
+	}
+
+	return nil
 }
 
 func (e *Engine) flushToSSTable() error {
@@ -101,6 +124,8 @@ func (e *Engine) flushToSSTable() error {
 	index := []sstable.IndexEntry{}
 	i := 1
 	binaryOffset := 0
+	maxKey := ""
+	minKey := ""
 
 	for flushItem := range flushItems {
 		curItemSize, err := ssTable.FlushWriteItems(flushItem.Key, flushItem.Value)
@@ -114,6 +139,12 @@ func (e *Engine) flushToSSTable() error {
 		if i%10 == 0 {
 			index = append(index, sstable.IndexEntry{Key: flushItem.Key, Offset: binaryOffset})
 		}
+
+		if i == 1 {
+			minKey = flushItem.Key
+		}
+
+		maxKey = flushItem.Key
 		i++
 	}
 
@@ -122,6 +153,17 @@ func (e *Engine) flushToSSTable() error {
 	if err != nil {
 		return err
 	}
+
+	ssTableMetadata := sstable.SSTableMetadata{
+		Action:     uint8(sstable.ActionAdd),
+		FileNumber: e.fileCount,
+		MinKey:     minKey,
+		MaxKey:     maxKey,
+	}
+
+	print(e.fileCount)
+
+	err = e.ssTableRegistry.AppendFileMetadata(ssTableMetadata)
 
 	e.fileCount++
 

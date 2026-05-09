@@ -13,6 +13,7 @@ type Config struct {
 	WALFilePath              string
 	WALRemoveFilePath        string
 	SSTableFilePath          string
+	SSTableManifestFilePath  string
 	SSTableFileSeqeunceLen   int
 	MaxMemTableSize          int
 }
@@ -28,6 +29,7 @@ func LoadConfig() Config {
 		WALFilePath:              getEnv("WAL_FILE_PATH", "./wal.log"),
 		WALRemoveFilePath:        getEnv("WAL_REMOVE_FILE_PATH", "./wal-remove"),
 		SSTableFilePath:          getEnv("SS_TABLE_FILE_PATH", "./sstable"),
+		SSTableManifestFilePath:  getEnv("SS_TABLE_MANIFEST_FILE_PATH", "./MANIFEST"),
 		SSTableFileSeqeunceLen:   int(ssTableFileSeqeunceLen),
 		MaxMemTableSize:          int(maxMemTableSize),
 	}

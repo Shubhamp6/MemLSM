@@ -53,13 +53,14 @@ func (w *WAL) Write(key string, value []byte) error {
 	return w.file.Sync()
 }
 
-func (w *WAL) Recover(sl *memtable.SkipList) error {
+func (w *WAL) RecoverMemoryStore(sl *memtable.SkipList) error {
 	f, err := os.Open(w.file.Name())
 
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
+		log.Printf("Error opening WAL file: %v", err)
 		return err
 	}
 
@@ -95,6 +96,9 @@ func (w *WAL) Recover(sl *memtable.SkipList) error {
 		valueBuf := make([]byte, valueLen)
 
 		if _, err := io.ReadFull(f, valueBuf); err != nil {
+			if err == io.ErrUnexpectedEOF {
+				return nil
+			}
 			return err
 		}
 

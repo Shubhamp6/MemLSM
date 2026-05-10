@@ -80,7 +80,7 @@ func (sl *SkipList) Put(key string, value []byte) {
 	}
 }
 
-func (sl *SkipList) Get(key string) (bool, []byte) {
+func (sl *SkipList) Get(key string) (bool, string) {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
 
@@ -92,8 +92,8 @@ func (sl *SkipList) Get(key string) (bool, []byte) {
 	}
 
 	if cur != nil && cur.next[0] != nil && cur.next[0].key == key {
-		return true, cur.next[0].value
+		return true, string(cur.next[0].value)
 	}
 
-	return false, []byte{}
+	return false, ""
 }

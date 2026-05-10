@@ -20,7 +20,11 @@ func main() {
 		log.Printf("Error initializing Engine: %v", err)
 	}
 
-	//test flushing
-	e.Put("userid", []byte("name"))
-	e.Put("userid", []byte("name"))
+	//test
+	// e.Put("userid1", []byte("name1"))
+	// e.Put("userid2", []byte("name2"))
+
+	// _, value := e.Get("userid1")
+
+	// fmt.Printf("Found value: %s", value)
 }

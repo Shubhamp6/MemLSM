@@ -72,7 +72,7 @@ func (e *Engine) Put(key string, value []byte) error {
 	return nil
 }
 
-func (e *Engine) Get(key string) (bool, []byte) {
+func (e *Engine) Get(key string) (bool, string) {
 	found, value := e.activeMemtable.SkipList.Get(key)
 
 	if found == false && e.immutableMemtable != nil {
@@ -80,7 +80,8 @@ func (e *Engine) Get(key string) (bool, []byte) {
 	}
 
 	if found == false {
-
+		ssTable := &sstable.SSTable{}
+		found, value = ssTable.Get(e.ssTableRegistry, key, e.cfg)
 	}
 
 	return found, value
@@ -104,7 +105,7 @@ func (e *Engine) Recover() error {
 	metadataLen := len(e.ssTableRegistry.Metadata)
 
 	if metadataLen > 0 {
-		e.fileCount = e.ssTableRegistry.Metadata[metadataLen-1].FileNumber
+		e.fileCount = e.ssTableRegistry.Metadata[metadataLen-1].FileNumber + 1
 	}
 
 	return nil
@@ -160,8 +161,6 @@ func (e *Engine) flushToSSTable() error {
 		MinKey:     minKey,
 		MaxKey:     maxKey,
 	}
-
-	print(e.fileCount)
 
 	err = e.ssTableRegistry.AppendFileMetadata(ssTableMetadata)
 

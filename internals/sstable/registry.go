@@ -53,6 +53,8 @@ func (sstableregistry *SSTableRegistry) AppendFileMetadata(metadata SSTableMetad
 	sstableregistry.mu.Lock()
 	defer sstableregistry.mu.Unlock()
 
+	sstableregistry.Metadata = append(sstableregistry.Metadata, metadata)
+
 	minKeyBuf := []byte(metadata.MinKey)
 	maxKeyBuf := []byte(metadata.MaxKey)
 	buf := make([]byte, actionBufLen+fileNumberBufLen+keyLenBufLen+len(minKeyBuf)+keyLenBufLen+len(maxKeyBuf))
@@ -170,4 +172,15 @@ func (sstableregistry *SSTableRegistry) RecovertSSTableRegistry() error {
 		return cmp.Compare(a.FileNumber, b.FileNumber)
 	})
 	return nil
+}
+
+func (sstableregistry *SSTableRegistry) GetSearchSSTables(key string) []int {
+	searchSSTables := []int{}
+	for i := len(sstableregistry.Metadata) - 1; i >= 0; i-- {
+        meta := sstableregistry.Metadata[i]
+        if meta.MinKey <= key && meta.MaxKey >= key {
+            searchSSTables = append(searchSSTables, meta.FileNumber)
+        }
+    }
+    return searchSSTables
 }

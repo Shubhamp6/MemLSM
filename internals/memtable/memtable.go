@@ -9,8 +9,9 @@ type MemTable struct {
 }
 
 type Item struct {
-	Key   string
-	Value []byte
+	Key       string
+	Value     []byte
+	IsDeleted bool
 }
 
 func NewMemTable(cfg *config.Config) *MemTable {
@@ -41,8 +42,9 @@ func (m *MemTable) FlushIterator() <-chan Item {
 			}
 
 			ch <- Item{
-				Key:   cur.next[0].key,
-				Value: cur.next[0].value,
+				Key:       cur.next[0].key,
+				Value:     cur.next[0].value,
+				IsDeleted: cur.next[0].isDeleted,
 			}
 
 			cur = cur.next[0]

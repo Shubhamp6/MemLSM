@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	helper "mem-lsm/common"
 	"mem-lsm/config"
 	"os"
 	"sync"
@@ -31,19 +32,20 @@ func Open(path string) (*SSTable, error) {
 	return &SSTable{file: f}, err
 }
 
-func (sstable *SSTable) FlushWriteItems(key string, value []byte) (int, error) {
+func (sstable *SSTable) FlushWriteItems(key string, value []byte, isDeleted bool) (int, error) {
 	sstable.mu.Lock()
 	defer sstable.mu.Unlock()
 
 	keyBuf := []byte(key)
 
-	binaryOffset := 4 + len(keyBuf) + 4 + len(value)
+	binaryOffset := 1 + 4 + len(keyBuf) + 4 + len(value)
 	buf := make([]byte, binaryOffset)
+	buf[0] = helper.ConvertBoolToByte(isDeleted)
 
-	binary.BigEndian.PutUint32(buf[0:4], uint32(len(keyBuf)))
-	copy(buf[4:4+len(keyBuf)], keyBuf)
+	binary.BigEndian.PutUint32(buf[1:1+4], uint32(len(keyBuf)))
+	copy(buf[1+4:1+4+len(keyBuf)], keyBuf)
 
-	valStart := 4 + len(keyBuf)
+	valStart := 1 + 4 + len(keyBuf)
 	binary.BigEndian.PutUint32(buf[valStart:valStart+4], uint32(len(value)))
 	copy(buf[valStart+4:], value)
 
@@ -114,7 +116,7 @@ func (sstable *SSTable) Get(ssTableRegistry *SSTableRegistry, key string, cfg *c
 			return false, ""
 		}
 
-		value, err := searchSSTable(f, key, fileSearchStartOffset)
+		found, isDeleted, value, err := searchSSTable(f, key, fileSearchStartOffset)
 
 		if err != nil {
 			log.Printf("Error finding key in ss table(file number: %d): %v", ssTableFileNumber, err)
@@ -122,7 +124,12 @@ func (sstable *SSTable) Get(ssTableRegistry *SSTableRegistry, key string, cfg *c
 			return false, ""
 		}
 
-		if value != "" {
+		if isDeleted {
+			f.Close()
+			return false, ""
+		}
+
+		if found {
 			f.Close()
 			return true, value
 		}
@@ -201,40 +208,54 @@ func searchIndex(f *os.File, key string) (int, error) {
 	}
 }
 
-func searchSSTable(f *os.File, key string, startOffset int) (string, error) {
+func searchSSTable(f *os.File, key string, startOffset int) (bool, bool, string, error) {
 	_, err := f.Seek(int64(startOffset), io.SeekStart)
 
 	if err != nil {
-		return "", err
+		return false, false, "", err
 	}
 
 	for {
-		keyLenBuf := make([]byte, 4)
-		if _, err = io.ReadFull(f, keyLenBuf); err != nil {
+		tombstoneBuf := make([]byte, 1)
+		if _, err = io.ReadFull(f, tombstoneBuf); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				return "", nil
+				return false, false, "", nil
 			}
 
-			return "", err
+			return false, false, "", err
+		}
+		isDeleted := helper.ConvertByteToBool(tombstoneBuf[0])
+
+		keyLenBuf := make([]byte, 4)
+		if _, err = io.ReadFull(f, keyLenBuf); err != nil {
+			if err == io.ErrUnexpectedEOF {
+				return false, false, "", nil
+			}
+
+			return false, false, "", err
 		}
 		keyLen := binary.BigEndian.Uint32(keyLenBuf)
 
 		keyBuf := make([]byte, keyLen)
 		if _, err = io.ReadFull(f, keyBuf); err != nil {
 			if err == io.ErrUnexpectedEOF {
-				return "", nil
+				return false, false, "", nil
 			}
 
-			return "", err
+			return false, false, "", err
+		}
+
+		if key == string(keyBuf) && isDeleted {
+			return false, true, "", nil
 		}
 
 		valueLenBuf := make([]byte, 4)
 		if _, err = io.ReadFull(f, valueLenBuf); err != nil {
 			if err == io.ErrUnexpectedEOF {
-				return "", nil
+				return false, false, "", nil
 			}
 
-			return "", err
+			return false, false, "", err
 		}
 		valueLen := binary.BigEndian.Uint32(valueLenBuf)
 
@@ -242,17 +263,17 @@ func searchSSTable(f *os.File, key string, startOffset int) (string, error) {
 			valueBuf := make([]byte, valueLen)
 			if _, err = io.ReadFull(f, valueBuf); err != nil {
 				if err == io.ErrUnexpectedEOF {
-					return "", nil
+					return false, false, "", nil
 				}
 
-				return "", err
+				return false, false, "", err
 			}
-			return string(valueBuf), nil
+			return true, false, string(valueBuf), nil
 		} else {
 			_, err := f.Seek(int64(valueLen), io.SeekCurrent)
 
 			if err != nil {
-				return "", err
+				return false, false, "", err
 			}
 		}
 	}

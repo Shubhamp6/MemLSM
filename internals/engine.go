@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"log"
 	"mem-lsm/config"
 	memtable "mem-lsm/internals/memtable"
@@ -36,8 +37,7 @@ func NewEngine(cfg *config.Config) (*Engine, error) {
 	}, nil
 }
 
-func (e *Engine) Put(key string, value []byte) error {
-
+func (e *Engine) addEntry(key string, value []byte, isDelete bool) error {
 	if e.activeMemtable.IsFull(key, value) == true {
 		e.mu.Lock()
 		e.immutableMemtable = e.activeMemtable
@@ -62,21 +62,33 @@ func (e *Engine) Put(key string, value []byte) error {
 		// }()
 	}
 
-	err := e.wal.Write(key, value)
+	err := e.wal.Write(key, value, isDelete)
 
 	if err != nil {
 		return err
 	}
 
-	e.activeMemtable.SkipList.Put(key, value)
+	e.activeMemtable.SkipList.Put(key, value, isDelete)
 	return nil
 }
 
+func (e *Engine) Put(key string, value []byte) error {
+	return e.addEntry(key, value, false)
+}
+
 func (e *Engine) Get(key string) (bool, string) {
-	found, value := e.activeMemtable.SkipList.Get(key)
+	found, isDeleted, value := e.activeMemtable.SkipList.Get(key)
+	fmt.Printf("key: %v, isDeleted: %v\n", key, isDeleted)
+	if isDeleted {
+		return false, ""
+	}
 
 	if found == false && e.immutableMemtable != nil {
-		found, value = e.immutableMemtable.SkipList.Get(key)
+		found, isDeleted, value = e.immutableMemtable.SkipList.Get(key)
+	}
+
+	if isDeleted {
+		return false, ""
 	}
 
 	if found == false {
@@ -85,6 +97,10 @@ func (e *Engine) Get(key string) (bool, string) {
 	}
 
 	return found, value
+}
+
+func (e *Engine) Remove(key string) error {
+	return e.addEntry(key, nil, true)
 }
 
 func (e *Engine) Recover() error {
@@ -129,7 +145,7 @@ func (e *Engine) flushToSSTable() error {
 	minKey := ""
 
 	for flushItem := range flushItems {
-		curItemSize, err := ssTable.FlushWriteItems(flushItem.Key, flushItem.Value)
+		curItemSize, err := ssTable.FlushWriteItems(flushItem.Key, flushItem.Value, flushItem.IsDeleted)
 
 		if err != nil {
 			return err

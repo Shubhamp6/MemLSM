@@ -7,9 +7,10 @@ import (
 )
 
 type Node struct {
-	key   string
-	value []byte
-	next  []*Node
+	key       string
+	value     []byte
+	isDeleted bool
+	next      []*Node
 }
 
 type SkipList struct {
@@ -36,7 +37,7 @@ func randomLevel(cfg *config.Config) int {
 	return level
 }
 
-func (sl *SkipList) Put(key string, value []byte) {
+func (sl *SkipList) Put(key string, value []byte, isDelete bool) {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
 
@@ -55,6 +56,7 @@ func (sl *SkipList) Put(key string, value []byte) {
 
 	if cur != nil && cur.key == key {
 		cur.value = value
+		cur.isDeleted = isDelete
 		return
 	}
 
@@ -69,9 +71,10 @@ func (sl *SkipList) Put(key string, value []byte) {
 	}
 
 	newNode := &Node{
-		key:   key,
-		value: value,
-		next:  make([]*Node, randLevel+1),
+		key:       key,
+		value:     value,
+		isDeleted: isDelete,
+		next:      make([]*Node, randLevel+1),
 	}
 
 	for i := 0; i <= randLevel; i++ {
@@ -80,7 +83,7 @@ func (sl *SkipList) Put(key string, value []byte) {
 	}
 }
 
-func (sl *SkipList) Get(key string) (bool, string) {
+func (sl *SkipList) Get(key string) (bool, bool, string) {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
 
@@ -92,8 +95,12 @@ func (sl *SkipList) Get(key string) (bool, string) {
 	}
 
 	if cur != nil && cur.next[0] != nil && cur.next[0].key == key {
-		return true, string(cur.next[0].value)
+		if cur.next[0].isDeleted {
+			return false, true, ""
+		} else {
+			return true, false, string(cur.next[0].value)
+		}
 	}
 
-	return false, ""
+	return false, false, ""
 }

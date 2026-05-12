@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"io"
 	"log"
+	helper "mem-lsm/common"
 	"mem-lsm/internals/memtable"
 	"os"
 	"sync"
@@ -29,17 +30,21 @@ func Delete(path string) error {
 	return os.Remove(path)
 }
 
-func (w *WAL) Write(key string, value []byte) error {
+func (w *WAL) Write(key string, value []byte, isDelete bool) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	keyBuf := []byte(key)
-	buf := make([]byte, 4+len(keyBuf)+4+len(value))
+	buf := make([]byte, 1+4+len(keyBuf)+4+len(value))
 
-	binary.BigEndian.PutUint32(buf[0:4], uint32(len(keyBuf)))
-	copy(buf[4:4+len(keyBuf)], keyBuf)
+	tombstoneBuf := helper.ConvertBoolToByte(isDelete)
 
-	valStart := 4 + len(keyBuf)
+	buf[0] = tombstoneBuf
+
+	binary.BigEndian.PutUint32(buf[1:1+4], uint32(len(keyBuf)))
+	copy(buf[1+4:1+4+len(keyBuf)], keyBuf)
+
+	valStart := 1 + 4 + len(keyBuf)
 	binary.BigEndian.PutUint32(buf[valStart:4+valStart], uint32(len(value)))
 	copy(buf[4+valStart:], value)
 
@@ -67,6 +72,16 @@ func (w *WAL) RecoverMemoryStore(sl *memtable.SkipList) error {
 	defer f.Close()
 
 	for {
+		tombstoneBuf := make([]byte, 1)
+
+		if _, err := io.ReadFull(f, tombstoneBuf); err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				return nil
+			}
+
+			return err
+		}
+		tombstone := helper.ConvertByteToBool(tombstoneBuf[0])
 		lenBuf := make([]byte, 4)
 
 		if _, err := io.ReadFull(f, lenBuf); err != nil {
@@ -102,7 +117,7 @@ func (w *WAL) RecoverMemoryStore(sl *memtable.SkipList) error {
 			return err
 		}
 
-		sl.Put(string(keyBuf), valueBuf)
+		sl.Put(string(keyBuf), valueBuf, tombstone)
 	}
 }
 

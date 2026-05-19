@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"fmt"
 	"log"
 	"mem-lsm/config"
 	memtable "mem-lsm/internals/memtable"
@@ -9,6 +8,7 @@ import (
 	"mem-lsm/internals/wal"
 	"strconv"
 	"sync"
+	"sync/atomic"
 )
 
 type Engine struct {
@@ -17,7 +17,7 @@ type Engine struct {
 	activeMemtable    *memtable.MemTable
 	immutableMemtable *memtable.MemTable
 	ssTableRegistry   *sstable.SSTableRegistry
-	fileCount         int
+	fileCount         atomic.Int32
 	mu                sync.Mutex
 }
 
@@ -33,7 +33,7 @@ func NewEngine(cfg *config.Config) (*Engine, error) {
 		wal:             wal,
 		activeMemtable:  memtable.NewMemTable(cfg),
 		ssTableRegistry: sstable.NewSSTableRegistry(cfg),
-		fileCount:       0,
+		fileCount:       atomic.Int32{},
 	}, nil
 }
 
@@ -43,7 +43,7 @@ func (e *Engine) addEntry(key string, value []byte, isDelete bool) error {
 		e.immutableMemtable = e.activeMemtable
 		e.activeMemtable = memtable.NewMemTable(e.cfg)
 
-		archivedWalFilePath := e.cfg.WALRemoveFilePath + "-" + strconv.Itoa(e.fileCount) + ".log"
+		archivedWalFilePath := e.cfg.WALRemoveFilePath + "-" + strconv.Itoa(int(e.fileCount.Load())) + ".log"
 		newWal, err := e.wal.Rotate(e.cfg.WALFilePath, archivedWalFilePath)
 
 		if err != nil {
@@ -54,12 +54,10 @@ func (e *Engine) addEntry(key string, value []byte, isDelete bool) error {
 		e.wal = newWal
 		e.mu.Unlock()
 
-		// go func() {
 		if err := e.flushToSSTable(); err == nil {
 			wal.Delete(archivedWalFilePath)
 			e.immutableMemtable = nil
 		}
-		// }()
 	}
 
 	err := e.wal.Write(key, value, isDelete)
@@ -68,6 +66,7 @@ func (e *Engine) addEntry(key string, value []byte, isDelete bool) error {
 		return err
 	}
 
+	e.activeMemtable.SizeBytes += 1 + len([]byte(key)) + len(value)
 	e.activeMemtable.SkipList.Put(key, value, isDelete)
 	return nil
 }
@@ -78,7 +77,7 @@ func (e *Engine) Put(key string, value []byte) error {
 
 func (e *Engine) Get(key string) (bool, string) {
 	found, isDeleted, value := e.activeMemtable.SkipList.Get(key)
-	fmt.Printf("key: %v, isDeleted: %v\n", key, isDeleted)
+
 	if isDeleted {
 		return false, ""
 	}
@@ -111,18 +110,14 @@ func (e *Engine) Recover() error {
 		return err
 	}
 
-	err = e.ssTableRegistry.RecovertSSTableRegistry()
+	latestFileNumber, err := e.ssTableRegistry.RecoverSSTableRegistry()
 
 	if err != nil {
 		log.Printf("Error recovering ss table registry from manifest file: %v", err)
 		return err
 	}
 
-	metadataLen := len(e.ssTableRegistry.Metadata)
-
-	if metadataLen > 0 {
-		e.fileCount = e.ssTableRegistry.Metadata[metadataLen-1].FileNumber + 1
-	}
+	e.fileCount.Store(latestFileNumber + 1)
 
 	return nil
 }
@@ -130,57 +125,34 @@ func (e *Engine) Recover() error {
 func (e *Engine) flushToSSTable() error {
 	flushItems := e.immutableMemtable.FlushIterator()
 
-	ssTable, err := sstable.Open(e.cfg.SSTableFilePath + sstable.GetSSTableFileNameSuffix(e.fileCount, e.cfg.SSTableFileSeqeunceLen))
+	ssTable, err := sstable.Open(e.cfg.SSTableFilePath + sstable.GetSSTableFileNameSuffix(e.fileCount.Load(), e.cfg.SSTableFileSequenceLen))
 
 	if err != nil {
 		return err
 	}
 
 	defer ssTable.Close()
-
-	index := []sstable.IndexEntry{}
-	i := 1
-	binaryOffset := 0
-	maxKey := ""
-	minKey := ""
-
-	for flushItem := range flushItems {
-		curItemSize, err := ssTable.FlushWriteItems(flushItem.Key, flushItem.Value, flushItem.IsDeleted)
-
-		if err != nil {
-			return err
-		}
-
-		binaryOffset += curItemSize
-
-		if i%10 == 0 {
-			index = append(index, sstable.IndexEntry{Key: flushItem.Key, Offset: binaryOffset})
-		}
-
-		if i == 1 {
-			minKey = flushItem.Key
-		}
-
-		maxKey = flushItem.Key
-		i++
-	}
-
-	err = ssTable.FlushWriteIndex(index)
+	err = ssTable.Write(flushItems, e.ssTableRegistry, &e.fileCount)
 
 	if err != nil {
 		return err
 	}
 
-	ssTableMetadata := sstable.SSTableMetadata{
-		Action:     uint8(sstable.ActionAdd),
-		FileNumber: e.fileCount,
-		MinKey:     minKey,
-		MaxKey:     maxKey,
-	}
-
-	err = e.ssTableRegistry.AppendFileMetadata(ssTableMetadata)
-
-	e.fileCount++
+	go func() {
+		e.compact()
+	}()
 
 	return nil
+}
+
+func (e *Engine) compact() {
+	tiersForCompaction := e.ssTableRegistry.FindTiersForCompaction(e.cfg.MaxFilesPerTier)
+
+	for _, tierForCompaction := range tiersForCompaction {
+		err := e.ssTableRegistry.Compact(tierForCompaction, &e.fileCount, e.cfg)
+
+		if err != nil {
+			log.Printf("Error compacting level(%d): %v", tierForCompaction.SizeTier, err)
+		}
+	}
 }

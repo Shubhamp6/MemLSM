@@ -2,13 +2,16 @@ package sstable
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
-	helper "mem-lsm/common"
+	helper "mem-lsm/common/helper"
 	"mem-lsm/config"
+	"mem-lsm/internals/memtable"
 	"os"
 	"sync"
+	"sync/atomic"
 )
 
 type SSTable struct {
@@ -22,7 +25,7 @@ type IndexEntry struct {
 }
 
 func Open(path string) (*SSTable, error) {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
 
 	if err != nil {
 		log.Printf("Error opening ss table file: %v", err)
@@ -32,10 +35,60 @@ func Open(path string) (*SSTable, error) {
 	return &SSTable{file: f}, err
 }
 
-func (sstable *SSTable) FlushWriteItems(key string, value []byte, isDeleted bool) (int, error) {
+func (sstable *SSTable) Write(flushItems <-chan memtable.Item, ssTableRegistry *SSTableRegistry, fileCount *atomic.Int32) error {
 	sstable.mu.Lock()
 	defer sstable.mu.Unlock()
+	index := []IndexEntry{}
+	i := 1
+	binaryOffset := 0
+	maxKey := ""
+	minKey := ""
+	currentFileNumber := (*fileCount).Load()
+	(*fileCount).Add(1)
 
+	for flushItem := range flushItems {
+		curItemSize, err := sstable.writeItems(flushItem.Key, flushItem.Value, flushItem.IsDeleted)
+
+		if err != nil {
+			return err
+		}
+
+		binaryOffset += curItemSize
+
+		if i%10 == 0 {
+			index = append(index, IndexEntry{Key: flushItem.Key, Offset: binaryOffset})
+		}
+
+		if i == 1 {
+			minKey = flushItem.Key
+		}
+
+		maxKey = flushItem.Key
+		i++
+	}
+
+	fileSize, err := sstable.writeIndex(index)
+
+	if err != nil {
+		return err
+	}
+
+	ssTableMetadata := SSTableMetadata{
+		Action:       uint8(ActionAdd),
+		FileNumber:   currentFileNumber,
+		MinKey:       minKey,
+		MaxKey:       maxKey,
+		SizeBytes:    fileSize,
+		IsCompacting: false,
+	}
+
+	err = ssTableRegistry.AppendFileMetadata(ssTableMetadata)
+
+	return nil
+
+}
+
+func (sstable *SSTable) writeItems(key string, value []byte, isDeleted bool) (int, error) {
 	keyBuf := []byte(key)
 
 	binaryOffset := 1 + 4 + len(keyBuf) + 4 + len(value)
@@ -59,10 +112,7 @@ func (sstable *SSTable) FlushWriteItems(key string, value []byte, isDeleted bool
 	return binaryOffset, sstable.file.Sync()
 }
 
-func (sstable *SSTable) FlushWriteIndex(indexEntries []IndexEntry) error {
-	sstable.mu.Lock()
-	defer sstable.mu.Unlock()
-
+func (sstable *SSTable) writeIndex(indexEntries []IndexEntry) (int64, error) {
 	indexStartOffset, _ := sstable.file.Seek(0, io.SeekCurrent)
 	for _, indexEntry := range indexEntries {
 		keyBuf := []byte(indexEntry.Key)
@@ -77,7 +127,7 @@ func (sstable *SSTable) FlushWriteIndex(indexEntries []IndexEntry) error {
 
 		if err != nil {
 			log.Printf("Error Writing index key to SS Table: %v", err)
-			return err
+			return 0, err
 		}
 
 	}
@@ -88,19 +138,104 @@ func (sstable *SSTable) FlushWriteIndex(indexEntries []IndexEntry) error {
 
 	if err != nil {
 		log.Printf("Error writing index start offset to ss table file: %v", err)
-		return err
+		return 0, err
 	}
 
-	return sstable.file.Sync()
+	fileSize, err := sstable.file.Seek(0, io.SeekEnd)
+
+	if err != nil {
+		log.Printf("Error seeking size of ss table file: %v", err)
+		return 0, err
+	}
+
+	return fileSize, sstable.file.Sync()
+}
+
+func (sstable *SSTable) GetIndexStartOffset() (int64, error) {
+	f := sstable.file
+	indexStartOffsetBuf := make([]byte, 8)
+
+	currenOffset, err := f.Seek(0, io.SeekCurrent)
+
+	if err != nil {
+		return -1, err
+	}
+
+	_, err = f.Seek(-8, io.SeekEnd)
+
+	if err != nil {
+		return -1, err
+	}
+
+	if _, err = io.ReadFull(f, indexStartOffsetBuf); err != nil {
+		return -1, err
+	}
+
+	indexStartOffset := binary.BigEndian.Uint64(indexStartOffsetBuf)
+
+	_, err = f.Seek(currenOffset, io.SeekStart)
+
+	if err != nil {
+		return -1, err
+	}
+
+	return int64(indexStartOffset), nil
+}
+
+func (sstable *SSTable) GetNextItem(indexStartOffSet int64) (memtable.Item, error) {
+	f := sstable.file
+	var item memtable.Item
+	var err error
+
+	currentOffset, err := f.Seek(0, io.SeekCurrent)
+
+	if err != nil {
+		return item, err
+	}
+
+	if currentOffset == int64(indexStartOffSet) {
+		return item, io.EOF
+	}
+
+	tombstoneBuf := make([]byte, 1)
+	if _, err = io.ReadFull(f, tombstoneBuf); err != nil {
+		return item, err
+	}
+	item.IsDeleted = helper.ConvertByteToBool(tombstoneBuf[0])
+
+	keyLenBuf := make([]byte, 4)
+	if _, err = io.ReadFull(f, keyLenBuf); err != nil {
+		return item, err
+	}
+	keyLen := binary.BigEndian.Uint32(keyLenBuf)
+
+	keyBuf := make([]byte, keyLen)
+	if _, err = io.ReadFull(f, keyBuf); err != nil {
+		return item, err
+	}
+	item.Key = string(keyBuf)
+
+	valueLenBuf := make([]byte, 4)
+	if _, err = io.ReadFull(f, valueLenBuf); err != nil {
+		return item, err
+	}
+	valueLen := binary.BigEndian.Uint32(valueLenBuf)
+
+	valueBuf := make([]byte, valueLen)
+	if _, err = io.ReadFull(f, valueBuf); err != nil {
+		return item, err
+	}
+	item.Value = valueBuf
+
+	return item, nil
 }
 
 func (sstable *SSTable) Get(ssTableRegistry *SSTableRegistry, key string, cfg *config.Config) (bool, string) {
 	sstable.mu.RLock()
 	defer sstable.mu.RUnlock()
 	searchSSTables := ssTableRegistry.GetSearchSSTables(key)
-
 	for _, ssTableFileNumber := range searchSSTables {
-		f, err := os.Open(cfg.SSTableFilePath + GetSSTableFileNameSuffix(ssTableFileNumber, cfg.SSTableFileSeqeunceLen))
+		f, err := os.Open(cfg.SSTableFilePath + GetSSTableFileNameSuffix(ssTableFileNumber, cfg.SSTableFileSequenceLen))
 
 		if err != nil {
 			log.Printf("Error opening ss table file(file number: %d) with error: %v", ssTableFileNumber, err)
@@ -280,11 +415,24 @@ func searchSSTable(f *os.File, key string, startOffset int) (bool, bool, string,
 }
 
 func (sstable *SSTable) Close() error {
-	return sstable.file.Close()
+	err := sstable.file.Close()
+
+	if err != nil && !errors.Is(err, os.ErrClosed) && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
-func GetSSTableFileNameSuffix(sequenceNumber int, sequenceLen int) string {
-	sequenceNumberString := fmt.Sprintf("%0*d", sequenceLen, sequenceNumber)
+func (sstable *SSTable) Remove() error {
+	err := sstable.Close()
+	if err != nil {
+		log.Printf("Error closing SS table file: %v", err)
+		return err
+	}
+	return os.Remove(sstable.file.Name())
+}
 
+func GetSSTableFileNameSuffix(sequenceNumber int32, sequenceLen int) string {
+	sequenceNumberString := fmt.Sprintf("%0*d", sequenceLen, sequenceNumber)
 	return "-" + sequenceNumberString + ".sst"
 }

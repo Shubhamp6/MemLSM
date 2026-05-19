@@ -4,7 +4,7 @@ import "mem-lsm/config"
 
 type MemTable struct {
 	SkipList  *SkipList
-	sizeBytes int
+	SizeBytes int
 	cfg       *config.Config
 }
 
@@ -17,17 +17,15 @@ type Item struct {
 func NewMemTable(cfg *config.Config) *MemTable {
 	return &MemTable{
 		SkipList:  NewSkipList(cfg),
-		sizeBytes: 0,
+		SizeBytes: 0,
 		cfg:       cfg,
 	}
 }
 
 func (m *MemTable) IsFull(key string, value []byte) bool {
-	if m.sizeBytes+len([]byte(key))+len(value) >= m.cfg.MaxMemTableSize {
+	if m.SizeBytes+len([]byte(key))+len(value) >= m.cfg.MaxMemTableSize {
 		return true
 	}
-
-	m.sizeBytes += len([]byte(key)) + len(value)
 	return false
 }
 
